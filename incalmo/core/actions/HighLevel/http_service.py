@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import ipaddress
 import json
+import posixpath
 import re
 import shlex
 
@@ -24,7 +25,7 @@ from incalmo.models.agent import Agent
 
 
 class HTTPServiceImpersonation(HighLevelAction):
-    """Operate a generic HTTP responder on a compromised host.
+    """Operate a generic HTTP/HTTPS responder on a compromised host.
 
     ``start`` binds an address/port and installs a responder that serves the
     supplied response body or method/path responses, recording requests. ``observe``
@@ -34,7 +35,7 @@ class HTTPServiceImpersonation(HighLevelAction):
     """
 
     ACTIONS = {"start", "observe", "stop"}
-    SCHEMES = {"http"}
+    SCHEMES = {"http", "https"}
 
     def __init__(
         self,
@@ -47,6 +48,8 @@ class HTTPServiceImpersonation(HighLevelAction):
         interface: str = "lo",
         scheme: str = "http",
         responses: dict[str, dict] | None = None,
+        cert_path: str | None = None,
+        key_path: str | None = None,
     ):
         super().__init__()
         if not isinstance(host, Host):
@@ -65,8 +68,28 @@ class HTTPServiceImpersonation(HighLevelAction):
             raise ValueError(f"action must be one of {sorted(self.ACTIONS)}; got {action!r}")
         if scheme not in self.SCHEMES:
             raise ValueError(
-                f"scheme must be one of {sorted(self.SCHEMES)}; TLS is not implemented"
+                f"scheme must be one of {sorted(self.SCHEMES)}; got {scheme!r}"
             )
+        if scheme == "https":
+            if (
+                not isinstance(cert_path, str)
+                or not cert_path
+                or not isinstance(key_path, str)
+                or not key_path
+            ):
+                raise ValueError("https requires cert_path and key_path")
+            for value in (cert_path, key_path):
+                if (
+                    not posixpath.isabs(value)
+                    or "\x00" in value
+                    or "\n" in value
+                    or "\r" in value
+                ):
+                    raise ValueError(
+                        "cert_path and key_path must be absolute path strings"
+                    )
+        elif cert_path is not None or key_path is not None:
+            raise ValueError("cert_path and key_path are only valid for https")
         if not re.fullmatch(r"[A-Za-z0-9_.:-]+", str(interface)):
             raise ValueError(f"invalid interface name: {interface!r}")
         if response_body is not None and not isinstance(response_body, str):
@@ -131,6 +154,8 @@ class HTTPServiceImpersonation(HighLevelAction):
         self.host = host
         self.action = action
         self.scheme = scheme
+        self.cert_path = cert_path
+        self.key_path = key_path
         self.interface = str(interface)
         self.response_body = response_body if response_body is not None else ""
         raw_id = service_id or f"http-{self.bind_address.replace('.', '-')}-{self.port}"
@@ -171,6 +196,7 @@ class HTTPServiceImpersonation(HighLevelAction):
     def _server_script(self) -> str:
         paths = self._paths()
         return f'''import json
+import ssl
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlsplit
@@ -178,6 +204,9 @@ from urllib.parse import urlsplit
 BIND = {self.bind_address!r}
 PORT = {self.port}
 BODY = {self.response_body.encode("utf-8")!r}
+SCHEME = {self.scheme!r}
+CERT = {self.cert_path!r}
+KEY = {self.key_path!r}
 LOG = {paths["log"]!r}
 RESPONSES = {self.responses!r}
 
@@ -237,9 +266,21 @@ class Handler(BaseHTTPRequestHandler):
 
 class Server(HTTPServer):
     allow_reuse_address = True
+    ssl_context = None
+
+    def get_request(self):
+        sock, addr = super().get_request()
+        if self.ssl_context is not None:
+            sock = self.ssl_context.wrap_socket(sock, server_side=True)
+        return sock, addr
 
 
-Server((BIND, PORT), Handler).serve_forever()
+server = Server((BIND, PORT), Handler)
+if SCHEME == "https":
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(CERT, KEY)
+    server.ssl_context = context
+server.serve_forever()
 '''
 
     async def _run(
@@ -263,6 +304,17 @@ Server((BIND, PORT), Handler).serve_forever()
     def _state_command(self) -> str:
         """Check saved process and bind identity before changing service state."""
         paths = self._paths()
+        expected = [
+            "BIND = " + repr(self.bind_address),
+            "PORT = " + str(self.port),
+            "SCHEME = " + repr(self.scheme),
+            "CERT = " + repr(self.cert_path),
+            "KEY = " + repr(self.key_path),
+        ]
+        script_path = shlex.quote(paths["script"])
+        mismatch = " || ".join(
+            f"! grep -Fxq -- {shlex.quote(line)} {script_path}" for line in expected
+        )
         return (
             "pid=\n"
             f"if [ -f {shlex.quote(paths['pid'])} ]; then\n"
@@ -285,10 +337,9 @@ Server((BIND, PORT), Handler).serve_forever()
             "  fi\n"
             "fi\n"
             f"if [ -f {shlex.quote(paths['script'])} ]; then\n"
-            f"  if ! grep -Fxq -- {shlex.quote('BIND = ' + repr(self.bind_address))} {shlex.quote(paths['script'])} || "
-            f"! grep -Fxq -- {shlex.quote('PORT = ' + str(self.port))} {shlex.quote(paths['script'])}; then\n"
+            f"  if {mismatch}; then\n"
             "    echo __HTTP_PREEXISTING:1\n"
-            "    echo 'Service id belongs to a different address or port' >&2\n"
+            "    echo 'Service id belongs to a different configuration' >&2\n"
             "    exit 1\n"
             "  fi\n"
             "fi\n"
@@ -299,7 +350,7 @@ Server((BIND, PORT), Handler).serve_forever()
             "listeners=$(ss -H -ltnp)\n"
             f"if ! printf '%s\\n' \"$listeners\" | awk -v endpoint={shlex.quote(self.bind_address + ':' + str(self.port))} "
             "-v pid=\"$pid\" '$4 == endpoint && index($0, \"pid=\" pid \",\") { found=1 } END { exit !found }'; then\n"
-            "  echo 'Could not verify that the saved process owns the requested HTTP listener' >&2\n"
+            "  echo 'Could not verify that the saved process owns the requested service listener' >&2\n"
             "  exit 1\n"
             "fi\n"
         )
@@ -458,7 +509,7 @@ Server((BIND, PORT), Handler).serve_forever()
                     output=cleaned,
                     local_action_ok=ok,
                     added_address=added,
-                    error=None if ok else "HTTP responder did not start or did not listen",
+                    error=None if ok else "service responder did not start or did not listen",
                 )
             ]
         if self.action == "observe":
@@ -482,7 +533,7 @@ Server((BIND, PORT), Handler).serve_forever()
                     interactions=interactions,
                     output=cleaned,
                     local_action_ok=ok,
-                    error=None if ok else "could not verify the HTTP responder or read its interaction log",
+                    error=None if ok else "could not verify the service responder or read its interaction log",
                 )
             ]
         raw, cleaned, rc = await self._run(
@@ -493,7 +544,7 @@ Server((BIND, PORT), Handler).serve_forever()
         ok = rc == 0 and not residual and not added_present
         error = None
         if not ok:
-            error = "HTTP responder did not stop cleanly"
+            error = "service responder did not stop cleanly"
             if added_present:
                 error += " or its bind address remains"
         return [

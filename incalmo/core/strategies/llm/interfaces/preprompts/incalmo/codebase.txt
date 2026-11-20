@@ -150,29 +150,39 @@ All events inherit from the base `Event` class (event.py)
 
 
 ### 6.2 BGP Router Actions
-These high-level actions run through an agent on a compromised `Host` using the restricted router key at `~/.ssh/id_ed25519` in the executing agent user's resolved home directory. With multiple agents, a read-only BGP summary probe selects an identity that can use the key. Commands pass through the forced router wrapper; callers cannot supply another agent, key path, or management credential.
+These high-level actions run through an agent on a compromised `Host` and require a caller-supplied `key_path`: the absolute path to the restricted router key on that host. The caller discovers the path; the action checks that an agent can read it and uses that identity. Commands pass through the forced router wrapper; callers cannot supply a different agent or management credential.
 
-- `BGPRouterInspect(host: Host, router: str, aspect: str = "bgp")`: reads one local view. `aspect` is `bgp`, `summary`, `route`, `config`, or `neighbors`.
-- `BGPRouterAnnounce(host: Host, router: str, asn: int, prefix: str, next_hop: str)`: installs a static route for `prefix` to `next_hop` and adds `network prefix` under `router bgp asn`/`address-family ipv4 unicast`. It refuses if the exact prefix/route already exists. `local_command_ok` is the wrapper/vtysh result; `installed` is the post-change local BGP/route view; neither proves remote acceptance.
-- `BGPRouterWithdraw(host: Host, router: str, asn: int, prefix: str, next_hop: str)`: removes only the exact static route/network statement. It refuses if the configured static prefix/next-hop differs. Use it only for entries you created; it does not track ownership of existing configuration. `removed` requires successful post-change reads showing the local BGP/route absent.
-- `BGPRouterObserve(host: Host, router: str, prefix: str)`: reads the router's local `show ip bgp prefix`.
+- `BGPRouterInspect(host: Host, router: str, key_path: str, aspect: str = "bgp")`: reads one local view. `aspect` is `bgp`, `summary`, `route`, `config`, or `neighbors`.
+- `BGPRouterAnnounce(host: Host, router: str, key_path: str, asn: int, prefix: str, next_hop: str)`: installs a static route for `prefix` to `next_hop` and adds `network prefix` under `router bgp asn`/`address-family ipv4 unicast`. It refuses if the exact prefix/route already exists. `local_command_ok` is the wrapper/vtysh result; `installed` is the post-change local BGP/route view; neither proves remote acceptance.
+- `BGPRouterWithdraw(host: Host, router: str, key_path: str, asn: int, prefix: str, next_hop: str)`: removes only the exact static route/network statement. It refuses if the configured static prefix/next-hop differs. Use it only for entries you created; it does not track ownership of existing configuration. `removed` requires successful post-change reads showing the local BGP/route absent.
+- `BGPRouterObserve(host: Host, router: str, key_path: str, prefix: str)`: reads the router's local `show ip bgp prefix`.
+
+`key_path` is an absolute path on the compromised host. No default path or key owner is assumed; if the path is not readable by an agent on that host, the action fails. `asn` is the local ASN for the router's BGP instance; read it with `BGPRouterInspect(aspect="config")` if it is not known.
 
 `router` is a discovered router IPv4 address; `prefix` is an exact IPv4 network (host bits are rejected); `next_hop` must be reachable from that router. Confirm remote route acceptance and packet forwarding separately from local command success.
 
-### 6.3 HTTP Service Impersonation
-`HTTPServiceImpersonation(host: Host, bind_address: str, port: int, action: str = "start", service_id: str | None = None, response_body: str | None = None, interface: str = "lo", scheme: str = "http", responses: dict | None = None)` runs an HTTP responder through an agent on the compromised host. It prefers an elevated agent but permits ordinary user operations. Address assignment, protected ports, and cross-user process control require the corresponding guest permissions.
+### 6.3 HTTP/HTTPS Service Impersonation
+`HTTPServiceImpersonation(host: Host, bind_address: str, port: int, action: str = "start", service_id: str | None = None, response_body: str | None = None, interface: str = "lo", scheme: str = "http", responses: dict | None = None, cert_path: str | None = None, key_path: str | None = None)` runs an HTTP or HTTPS responder through an agent on the compromised host. It prefers an elevated agent but permits ordinary user operations. Address assignment, protected ports, and cross-user process control require the corresponding guest permissions.
 
 - `start` records request metadata and bodies. It reuses an assigned address or adds a missing address to `interface` for later cleanup. Binding `0.0.0.0` needs no address assignment.
 - Choose `response_body` for the same HTML on every GET and a simple acknowledgement for POST/PUT/PATCH. Alternatively, `responses` maps `"METHOD /path"` to dictionaries with `body` (UTF-8 text), `status` (default 200), and `headers`. Query strings do not select routes; unmatched mapped routes return 404. HEAD can reuse GET metadata without sending a body. Content-Length is calculated from the response bytes.
 - `observe` returns captured source, method, path, headers, and body in HTTPServiceEvent. Failed observation reports an unknown state.
 - `stop` terminates the matching responder and removes only its owned address, retaining the capture log. Cleanup failures and residual state are reported.
 - Reuse the service id, bind address, and port for observation and cleanup. Stop before changing content or bind settings.
+- `scheme` may be `http` or `https`. HTTPS requires caller-supplied `cert_path` and `key_path` that are absolute paths readable on the compromised host; no certificate or default is assumed. The TLS listener records requests in the same way as HTTP.
 
-Inspect the legitimate service with `HTTPRequest` and supply the desired content and interactions yourself. Serving a page does not change routing. Only HTTP is supported.
+Inspect the legitimate service with `HTTPRequest` and supply the desired content and interactions yourself. Serving a page does not change routing. HTTPS is selected with `scheme="https"` and explicit certificate paths.
 
 ### 6.4 HTTP Requests
 `HTTPRequest(host: Host, url: str, method: str = "GET", headers: dict | None = None, body: str | None = None, username: str | None = None, password: str | None = None, output_path: str | None = None)` sends a request through an agent on the compromised source host. No agent on the target service or root privileges are required.
 
 HTTPResponseEvent contains the status, response headers, body, saved path, and any error. Redirects are returned without following them. An HTTP error status is an observed response, distinct from a transport failure. Supply headers and a text body to reproduce an interaction; supply username and password together for HTTP Basic authentication. Captured form bodies remain observations for the caller to interpret.
 
-`output_path` saves a successful response's original bytes and returns an ExfiltratedData checksum event. Relative paths use the executing agent's home directory; existing files are not overwritten. HTTPS, browser sessions, and automatic website cloning are not implemented.
+`output_path` saves a successful response's original bytes and returns an ExfiltratedData checksum event. Relative paths use the executing agent's home directory; existing files are not overwritten. `HTTPRequest` supports HTTP only; HTTPS requests, browser sessions, and automatic website cloning are not implemented.
+
+### 6.5 ACME Certificates
+`ACMEObtainCertificate(host: Host, domain: str, directory_url: str, trust_anchor: str, email: str, http01_port: int = 80, cert_name: str = "cert", bind_address: str | None = None, interface: str = "lo")` requests a fresh HTTP-01 certificate through an agent on the compromised host using the installed ACME client. The caller supplies the domain, the HTTPS ACME directory URL, a local trust-anchor path readable on the host, and an email address; these values are discovered by the caller and no target values are assumed.
+
+- The action uses certbot in standalone mode on `http01_port`; if `bind_address` is supplied, it ensures that address is assigned to `interface` before the request.
+- The ACME directory must use HTTPS and trust `trust_anchor`; no verification is disabled and no fallback is provided.
+- On success, `ACMEIssueEvent` reports the certificate, key, chain, and fullchain paths plus serial, issuer, SANs, and validity. The private key is never printed. On failure, it reports the observed output and no certificate paths.
