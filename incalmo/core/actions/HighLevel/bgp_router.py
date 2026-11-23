@@ -1,20 +1,20 @@
 """High-level BGP operations through a compromised host's restricted router access.
 
 The actions deliberately do not expose a general router shell. They require a
-`Host` with a C2 agent, use the edge key that is
-already installed on that host, and go through the existing forced wrapper.
-The event reports the attacker router's local command/view; remote route
-acceptance and traffic redirection are separate observations.
+`Host` with a C2 agent and a caller-supplied path to the restricted router key
+on that host, and go through the existing forced wrapper. The event reports the
+attacker router's local command/view; remote route acceptance and traffic
+redirection are separate observations.
 """
 
 from __future__ import annotations
 
 import ipaddress
+import posixpath
 import re
 import shlex
 
 from incalmo.core.actions.high_level_action import HighLevelAction
-from incalmo.core.actions.low_level_action import RESOLVE_HOME
 from incalmo.core.actions.LowLevel import RunBashCommand
 from incalmo.core.models.events import BashOutputEvent, BGPRouterEvent, Event
 from incalmo.core.models.network import Host
@@ -69,6 +69,20 @@ def _asn(value) -> int:
     return asn
 
 
+def _key_path(value) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or "\x00" in value
+        or "\n" in value
+        or "\r" in value
+    ):
+        raise ValueError("key_path must be a nonempty path string")
+    if not posixpath.isabs(value):
+        raise ValueError("key_path must be an absolute path")
+    return value
+
+
 def _router_address(router, host: Host) -> str:
     if isinstance(router, Host):
         def ipv4_addresses(value: Host) -> list[ipaddress.IPv4Address]:
@@ -120,45 +134,62 @@ def _prefix_config(output: str, prefix: str, asn: int) -> tuple[bool, set[str]]:
     return announced, routes
 
 
-def _ssh_command(router: str, remote: str) -> str:
+def _ssh_command(router: str, remote: str, key_path: str) -> str:
     """Build the one-argument remote wrapper command, executed on the agent host.
 
-    The key expression is intentionally the agent user's resolved home; it is
-    expanded by the agent host's shell, not by this process. All other values
-    are validated or quoted so they cannot become shell syntax.
+    ``key_path`` is an absolute path on the agent host and is quoted here; all
+    other values are validated or quoted so they cannot become shell syntax.
     """
-    key = f'"{RESOLVE_HOME}/.ssh/id_ed25519"'
     return (
         "ssh -T -o BatchMode=yes -o StrictHostKeyChecking=no "
         "-o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 "
-        f"-o IdentitiesOnly=yes -o LogLevel=ERROR -i {key} "
+        f"-o IdentitiesOnly=yes -o LogLevel=ERROR -i {shlex.quote(key_path)} "
         f"root@{router} {shlex.quote(remote)}; "
         f"__mhb_rc=$?; printf '\\n{_SSH_EXIT_MARKER}:%s\\n' \"$__mhb_rc\""
     )
 
 
 class _BGPRouterAction(HighLevelAction):
-    def __init__(self, host: Host, router):
+    def __init__(self, host: Host, router, key_path):
         super().__init__()
         if not isinstance(host, Host):
             raise ValueError(
-                "host must be the compromised Host with the restricted router key"
+                "host must be a compromised Host"
             )
         self.host = host
         self.router = _router_address(router, self.host)
+        self.key_path = _key_path(key_path)
+
+    async def _key_readable(
+        self,
+        low_level_action_orchestrator: LowLevelActionOrchestrator,
+        agent: Agent,
+        context: HighLevelContext,
+    ) -> bool:
+        command = (
+            f"test -r {shlex.quote(self.key_path)} "
+            "&& echo __KEY_READABLE:1 || echo __KEY_READABLE:0"
+        )
+        events = await low_level_action_orchestrator.run_action(
+            RunBashCommand(agent, command), context
+        )
+        output = "\n".join(
+            event.bash_output for event in events if isinstance(event, BashOutputEvent)
+        )
+        return "__KEY_READABLE:1" in output
 
     async def _select_agent(
         self,
         low_level_action_orchestrator: LowLevelActionOrchestrator,
         context: HighLevelContext,
     ) -> Agent:
-        """Use the host agent that actually holds the restricted router key.
+        """Use a host agent that can read the caller-supplied restricted key.
 
         A host normally has one agent. If multiple agents are present (for
-        example after privilege escalation), ``Host.get_agent()`` is random and
-        can select a user whose ``$HOME`` does not contain the authorized edge
-        key. Probe each agent with a read-only wrapper command and use the first
-        working identity; never guess.
+        example after privilege escalation), each is checked for read access to
+        the given key path; the first readable agent is used. With multiple
+        readable agents, a read-only BGP summary probe selects one that can use
+        the key; never guess.
         """
         agents = sorted(
             (agent for agent in self.host.agents if agent is not None),
@@ -169,9 +200,17 @@ class _BGPRouterAction(HighLevelAction):
                 "BGP action requires a C2 agent on the compromised host "
                 f"{self.host.hostname or self.host.ip_addresses}; the host is not compromised"
             )
-        if len(agents) == 1:
-            return agents[0]
+        readable = []
         for agent in agents:
+            if await self._key_readable(low_level_action_orchestrator, agent, context):
+                readable.append(agent)
+        if not readable:
+            raise RuntimeError(
+                "the restricted router key at the supplied path is not readable on this host"
+            )
+        if len(readable) == 1:
+            return readable[0]
+        for agent in readable:
             output, rc = await self._run(
                 low_level_action_orchestrator,
                 agent,
@@ -181,7 +220,7 @@ class _BGPRouterAction(HighLevelAction):
             if rc == 0 and "BGP" in output:
                 return agent
         raise RuntimeError(
-            "no C2 agent on the compromised host can use the restricted router key"
+            "no agent on this host can use the restricted router key"
         )
 
     async def _run(
@@ -191,7 +230,7 @@ class _BGPRouterAction(HighLevelAction):
         remote: str,
         context: HighLevelContext,
     ) -> tuple[str, int | None]:
-        command = _ssh_command(self.router, remote)
+        command = _ssh_command(self.router, remote, self.key_path)
         events = await low_level_action_orchestrator.run_action(
             RunBashCommand(agent, command), context
         )
@@ -212,8 +251,8 @@ class _BGPRouterAction(HighLevelAction):
 class BGPRouterInspect(_BGPRouterAction):
     """Read one local routing/running state view from the attacker router."""
 
-    def __init__(self, host: Host, router, aspect: str = "bgp"):
-        super().__init__(host, router)
+    def __init__(self, host: Host, router, key_path, aspect: str = "bgp"):
+        super().__init__(host, router, key_path)
         if aspect not in _ASPECT_COMMANDS:
             raise ValueError(
                 f"aspect must be one of {sorted(_ASPECT_COMMANDS)}; got {aspect!r}"
@@ -248,8 +287,8 @@ class BGPRouterInspect(_BGPRouterAction):
 class BGPRouterObserve(_BGPRouterAction):
     """Read the attacker router's local BGP view for one prefix."""
 
-    def __init__(self, host: Host, router, prefix):
-        super().__init__(host, router)
+    def __init__(self, host: Host, router, key_path, prefix):
+        super().__init__(host, router, key_path)
         self.prefix = _prefix(prefix)
 
     async def run(
@@ -285,8 +324,8 @@ class BGPRouterAnnounce(_BGPRouterAction):
     reflects the post-change local BGP and route views, not remote acceptance.
     """
 
-    def __init__(self, host: Host, router, asn, prefix, next_hop):
-        super().__init__(host, router)
+    def __init__(self, host: Host, router, key_path, asn, prefix, next_hop):
+        super().__init__(host, router, key_path)
         self.asn = _asn(asn)
         self.prefix = _prefix(prefix)
         self.next_hop = _ipv4(next_hop, "next_hop")
@@ -390,8 +429,8 @@ class BGPRouterAnnounce(_BGPRouterAction):
 class BGPRouterWithdraw(_BGPRouterAction):
     """Remove only the exact static route and BGP network statement for a prefix."""
 
-    def __init__(self, host: Host, router, asn, prefix, next_hop):
-        super().__init__(host, router)
+    def __init__(self, host: Host, router, key_path, asn, prefix, next_hop):
+        super().__init__(host, router, key_path)
         self.asn = _asn(asn)
         self.prefix = _prefix(prefix)
         self.next_hop = _ipv4(next_hop, "next_hop")

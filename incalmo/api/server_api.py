@@ -132,6 +132,7 @@ class C2ApiClient:
             "agent": low_level_action.agent.paw,
             "command": low_level_action.command,
             "payloads": low_level_action.payloads,
+            "timeout": getattr(low_level_action, "timeout_seconds", 60),
         }
         try:
             response = self._session.post(
@@ -149,7 +150,7 @@ class C2ApiClient:
             )
         command = Command(**response.json())
         command_id = command.id
-        max_attempts = 45
+        max_attempts = getattr(low_level_action, "poll_attempts", None) or 45
         started = time.monotonic()
         for _ in range(max_attempts):
             command = self.get_command_status(command_id)

@@ -33,3 +33,19 @@ These are general limitations of the current Incalmo implementation, independent
 - **Trigger:** Overlapping prefixes, multihomed hosts, hosts added before a more specific subnet is registered, or same-prefix subnets with different visibility.
 - **Impact:** Code that assumes one owning subnet may use a broader or different view, and attacker-subnet visibility can change which records are returned by default.
 - **Potential improvement:** Return all subnet memberships, accept an explicit visibility or subnet selector, or define an explicit primary subnet for callers that need one.
+
+## 5. Service exploitation is hard-coded to the Struts CVE
+
+- **Component/Source:** `incalmo/core/actions/HighLevel/lateral_move_to_host.py` (`if "CVE-2017-5638" in service_to_attack.CVE`), `incalmo/core/actions/HighLevel/attack_path_lateral_move.py`, `incalmo/core/actions/LowLevelOptimal/exploit_struts.py`, and `incalmo/core/strategies/llm/interfaces/preprompts/low-level-actions/codebase.txt` (`ExploitStruts`).
+- **Limitation:** The high-level lateral-movement path selects `ExploitStruts` only for CVE-2017-5638, and the low-level preprompt documents the Struts-specific action. The planner is therefore coupled to one service vulnerability, and the low-level documentation exposes the intended exploit. This predates the BGP/PKI work.
+- **Trigger:** Any environment whose intermediate service is not CVE-2017-5638, or an agent operating at the low-level-actions abstraction.
+- **Impact:** Non-Struts services cannot be exploited through this path; the planner can rely on a built-in vulnerability rather than discovering and selecting one; the low-level prompt can shortcut service discovery.
+- **Potential improvement:** Select an exploit from the observed service/CVE through a general registry or module interface, and remove the specific exploit from the low-level preprompt. This is out of scope for the BGP/PKI work and is not changed here. Documenting this limitation does not remove the low-level prompt exposure.
+
+## 6. Attacker-facing lateral-movement prompt uses multi-hop/pivot vocabulary
+
+- **Component/Source:** `incalmo/core/actions/HighLevel/llm_agents/msf_lateral_movement/preprompt.txt` (“foothold,” “multi-hop pivoting,” “pivot host”).
+- **Limitation:** The Metasploit lateral-movement sub-agent prompt describes multi-hop pivoting and pivoted sessions. The MSF path is currently disabled in `LateralMoveToHost`, but the prompt remains in the repository and would expose this vocabulary if that sub-agent were re-enabled.
+- **Trigger:** Enabling or invoking the MSF lateral-movement sub-agent.
+- **Impact:** The prompt describes attack-chain structure that is not specific to the current environment.
+- **Potential improvement:** Use environment-neutral lateral-movement language or remove the prompt if the MSF path remains disabled. This is out of scope for the BGP/PKI work and is not changed here.

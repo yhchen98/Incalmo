@@ -20,3 +20,5 @@ from .scan_report_event import ScanReportEvent
 from .bgp_router_event import BGPRouterEvent
 from .http_service_event import HTTPServiceEvent
 from .http_response_event import HTTPResponseEvent
+from .https_inspection_event import HTTPSInspectionEvent
+from .acme_issue_event import ACMEIssueEvent

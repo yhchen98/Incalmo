@@ -11,6 +11,7 @@ from incalmo.core.models.events import (
     VulnerableServiceFound,
     ScanReportEvent,
     ExfiltratedData,
+    ACMEIssueEvent,
 )
 from incalmo.core.models.network import Host
 
@@ -106,7 +107,41 @@ class EnvironmentStateService:
 
             if type(event) is ExfiltratedData:
                 self.handle_exfiltrated_data(event)
+
+            if type(event) is ACMEIssueEvent:
+                self.handle_ACMEIssueEvent(event)
         return
+
+    def handle_ACMEIssueEvent(self, event: ACMEIssueEvent):
+        if not event.success or not event.cert_path or not event.key_path:
+            return
+        host = self.network.find_host_by_agent(event.agent)
+        if host is None:
+            hosts = self.network.find_hosts_with_ips(event.agent.host_ip_addrs)
+            host = hosts[0] if hosts else None
+        if host is None:
+            return
+        artifact = {
+            "domain": event.domain,
+            "cert_path": event.cert_path,
+            "leaf_path": event.leaf_path,
+            "key_path": event.key_path,
+            "chain_path": event.chain_path,
+            "fullchain_path": event.fullchain_path,
+            "serial": event.serial,
+            "issuer": event.issuer,
+            "sans": list(event.sans),
+            "not_before": event.not_before,
+            "not_after": event.not_after,
+            "expired": event.expired,
+        }
+        for existing in host.certificates:
+            if {
+                "domain": existing.get("domain"),
+                "serial": existing.get("serial"),
+            } == {"domain": event.domain, "serial": event.serial}:
+                return
+        host.certificates.append(artifact)
 
     def handle_exfiltrated_data(self, event: ExfiltratedData):
         # Check if the file is already in the list
