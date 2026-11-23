@@ -13,6 +13,7 @@ class ACMEIssueEvent(Event):
         *,
         success: bool = False,
         cert_path: str | None = None,
+        leaf_path: str | None = None,
         key_path: str | None = None,
         chain_path: str | None = None,
         fullchain_path: str | None = None,
@@ -21,6 +22,7 @@ class ACMEIssueEvent(Event):
         sans: list[str] | None = None,
         not_before: str | None = None,
         not_after: str | None = None,
+        expired: bool | None = None,
         error: str | None = None,
         output: str = "",
     ):
@@ -30,6 +32,7 @@ class ACMEIssueEvent(Event):
         self.directory_url = directory_url
         self.success = success
         self.cert_path = cert_path
+        self.leaf_path = leaf_path
         self.key_path = key_path
         self.chain_path = chain_path
         self.fullchain_path = fullchain_path
@@ -38,6 +41,7 @@ class ACMEIssueEvent(Event):
         self.sans = list(sans or [])
         self.not_before = not_before
         self.not_after = not_after
+        self.expired = expired
         self.error = error
         self.output = output
 
@@ -54,7 +58,9 @@ class ACMEIssueEvent(Event):
             f"directory={self.directory_url}",
         ]
         if self.cert_path:
-            fields.append(f"cert={self.cert_path}")
+            fields.append(f"cert_chain={self.cert_path}")
+        if self.leaf_path:
+            fields.append(f"leaf={self.leaf_path}")
         if self.key_path:
             fields.append(f"key={self.key_path}")
         if self.chain_path:
@@ -71,6 +77,8 @@ class ACMEIssueEvent(Event):
             fields.append(f"not_before={self.not_before}")
         if self.not_after:
             fields.append(f"not_after={self.not_after}")
+        if self.expired is not None:
+            fields.append(f"expired={self.expired}")
         if self.error:
             fields.append(f"error={self.error}")
         fields.append("output:")

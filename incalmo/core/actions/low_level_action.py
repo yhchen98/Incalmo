@@ -31,11 +31,15 @@ class LowLevelAction(ABC):
         command: str,
         payloads: list[str] | None = None,
         command_delay: int = 0,
+        timeout_seconds: int = 60,
+        poll_attempts: int | None = None,
     ):
         self.agent = agent
         self.command = command
         self.payloads = payloads if payloads is not None else []
         self.command_delay = command_delay
+        self.timeout_seconds = timeout_seconds
+        self.poll_attempts = poll_attempts
 
     def __str__(self):
         def format_value(value):

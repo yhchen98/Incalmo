@@ -152,7 +152,8 @@ class Network:
 
     def remove_hosts(self, hosts: list[Host]):
         for subnet in self.subnets:
-            subnet.remove_hosts(hosts)
+            for host in hosts:
+                subnet.remove_host(host)
 
     def __str__(self) -> str:
         return f"{self.__class__.__name__}: {self.subnets}"

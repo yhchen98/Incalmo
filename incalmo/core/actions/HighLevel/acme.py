@@ -4,6 +4,7 @@ import ipaddress
 import posixpath
 import re
 import shlex
+import ssl
 import time
 from urllib.parse import urlsplit
 
@@ -75,8 +76,8 @@ class ACMEObtainCertificate(HighLevelAction):
             raise ValueError("trust_anchor must be an absolute path")
         if not isinstance(email, str) or not re.fullmatch(r"[^@\s]+@[^@\s]+", email):
             raise ValueError("email must be a nonempty address")
-        if isinstance(http01_port, bool) or not isinstance(http01_port, int) or not 1 <= http01_port <= 65535:
-            raise ValueError("http01_port must be an integer between 1 and 65535")
+        if http01_port != 80:
+            raise ValueError("HTTP-01 validation requires port 80")
         if not isinstance(cert_name, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", cert_name):
             raise ValueError("cert_name must contain only letters, digits, dot, underscore, or hyphen")
         if not re.fullmatch(r"[A-Za-z0-9_.:-]+", str(interface)):
@@ -130,10 +131,16 @@ class ACMEObtainCertificate(HighLevelAction):
     def _command(self) -> str:
         paths = self._paths()
         address = ""
+        cleanup_address = ""
         if self.bind_address is not None and self.bind_address != "0.0.0.0":
             address = (
+                "added=0\n"
                 f'if ! ip -4 addr show | grep -Fq "inet {self.bind_address}/"; then '
-                f"ip addr add {self.bind_address}/32 dev {shlex.quote(self.interface)}; fi\n"
+                f"ip addr add {self.bind_address}/32 dev {shlex.quote(self.interface)}; added=1; fi\n"
+            )
+            cleanup_address = (
+                f'if [ "$added" -eq 1 ]; then '
+                f"ip addr del {self.bind_address}/32 dev {shlex.quote(self.interface)} || true; fi\n"
             )
         certbot = (
             f"REQUESTS_CA_BUNDLE={shlex.quote(self.trust_anchor)} "
@@ -155,7 +162,8 @@ class ACMEObtainCertificate(HighLevelAction):
             + address
             + f"output=$({certbot} 2>&1)\n"
             "rc=$?\n"
-            'printf \'%s\\n\' "$output"\n'
+            + cleanup_address
+            + 'printf \'%s\\n\' "$output"\n'
             f"if [ \"$rc\" -eq 0 ] && [ -s {shlex.quote(paths['cert'])} ] && "
             f"[ -s {shlex.quote(paths['key'])} ]; then\n"
             f"  echo __ACME_CERT:{paths['cert']}\n"
@@ -180,7 +188,12 @@ class ACMEObtainCertificate(HighLevelAction):
         context: HighLevelContext,
     ) -> tuple[str, str, int | None]:
         events = await low_level_action_orchestrator.run_action(
-            RunBashCommand(agent, command), context
+            RunBashCommand(
+                agent,
+                command,
+                timeout_seconds=240,
+                poll_attempts=240,
+            ), context
         )
         raw = "\n".join(
             event.bash_output for event in events if isinstance(event, BashOutputEvent)
@@ -239,6 +252,12 @@ class ACMEObtainCertificate(HighLevelAction):
                 )
             ]
         parsed = self._parse(raw)
+        expired = None
+        if parsed.get("not_after"):
+            try:
+                expired = ssl.cert_time_to_seconds(parsed["not_after"]) <= time.time()
+            except (ValueError, TypeError):
+                expired = None
         return [
             ACMEIssueEvent(
                 self.host,
@@ -246,7 +265,17 @@ class ACMEObtainCertificate(HighLevelAction):
                 self.domain,
                 self.directory_url,
                 success=True,
+                cert_path=parsed.get("fullchain_path"),
+                leaf_path=parsed.get("cert_path"),
+                key_path=parsed.get("key_path"),
+                chain_path=parsed.get("chain_path"),
+                fullchain_path=parsed.get("fullchain_path"),
+                serial=parsed.get("serial"),
+                issuer=parsed.get("issuer"),
+                sans=parsed.get("sans"),
+                not_before=parsed.get("not_before"),
+                not_after=parsed.get("not_after"),
+                expired=expired,
                 output=cleaned,
-                **parsed,
             )
         ]

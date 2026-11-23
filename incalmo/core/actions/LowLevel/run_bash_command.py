@@ -10,8 +10,19 @@ _COMPLETED_STATUSES = {"success", "completed", "ok", "0"}
 
 
 class RunBashCommand(LowLevelAction):
-    def __init__(self, agent: Agent, command: str):
-        super().__init__(agent, command)
+    def __init__(
+        self,
+        agent: Agent,
+        command: str,
+        timeout_seconds: int = 60,
+        poll_attempts: int | None = None,
+    ):
+        super().__init__(
+            agent,
+            command,
+            timeout_seconds=timeout_seconds,
+            poll_attempts=poll_attempts,
+        )
 
     async def get_result(
         self,

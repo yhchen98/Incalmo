@@ -127,6 +127,8 @@ All events inherit from the base `Event` class (event.py)
 
 ## 6. Actions
 
+Actions are imported from the `incalmo.core.actions.HighLevel` package. For example, `Scan` is imported with `from incalmo.core.actions.HighLevel import Scan`.
+
 ### 6.1 High-Level Actions
 - `FindInformationOnAHost` (find_information_on_host.py): Finds information on a host (attacker must have access to the host), including SSH configurations and critical data files. Example usage:
 
@@ -162,7 +164,7 @@ These high-level actions run through an agent on a compromised `Host` and requir
 `router` is a discovered router IPv4 address; `prefix` is an exact IPv4 network (host bits are rejected); `next_hop` must be reachable from that router. Confirm remote route acceptance and packet forwarding separately from local command success.
 
 ### 6.3 HTTP/HTTPS Service Impersonation
-`HTTPServiceImpersonation(host: Host, bind_address: str, port: int, action: str = "start", service_id: str | None = None, response_body: str | None = None, interface: str = "lo", scheme: str = "http", responses: dict | None = None, cert_path: str | None = None, key_path: str | None = None)` runs an HTTP or HTTPS responder through an agent on the compromised host. It prefers an elevated agent but permits ordinary user operations. Address assignment, protected ports, and cross-user process control require the corresponding guest permissions.
+`HTTPServiceImpersonation(host: Host, bind_address: str, port: int, action: str = "start", service_id: str | None = None, response_body: str | None = None, interface: str = "lo", scheme: str = "http", responses: dict | None = None, cert_path: str | None = None, key_path: str | None = None)` runs an HTTP or HTTPS responder through an agent on the compromised host. For HTTPS, `cert_path` must be the server certificate chain (the fullchain returned by the ACME action), not only the leaf certificate. It prefers an elevated agent but permits ordinary user operations. Address assignment, protected ports, and cross-user process control require the corresponding guest permissions.
 
 - `start` records request metadata and bodies. It reuses an assigned address or adds a missing address to `interface` for later cleanup. Binding `0.0.0.0` needs no address assignment.
 - Choose `response_body` for the same HTML on every GET and a simple acknowledgement for POST/PUT/PATCH. Alternatively, `responses` maps `"METHOD /path"` to dictionaries with `body` (UTF-8 text), `status` (default 200), and `headers`. Query strings do not select routes; unmatched mapped routes return 404. HEAD can reuse GET metadata without sending a body. Content-Length is calculated from the response bytes.
@@ -173,16 +175,23 @@ These high-level actions run through an agent on a compromised `Host` and requir
 
 Inspect the legitimate service with `HTTPRequest` and supply the desired content and interactions yourself. Serving a page does not change routing. HTTPS is selected with `scheme="https"` and explicit certificate paths.
 
-### 6.4 HTTP Requests
+### 6.4 HTTPS Inspection
+`HTTPSInspect(host: Host, target: str, port: int = 443, server_name: str | None = None, ca_file: str | None = None, timeout: int = 15)` performs a TLS handshake through an agent on the compromised host and returns the endpoint's certificate identity and verification result. It does not send an HTTP request or credentials.
+
+- `server_name` selects SNI. Omit it for a no-SNI connection so a default certificate can be inspected.
+- `ca_file` is an absolute trust-anchor path on the compromised host. Without it, the host's default trust store is used; no verification is disabled.
+- The event reports whether TLS connected and verified, the TLS version, verification code and error, and the certificate subject, issuer, serial, validity, and SANs. A nonzero verification code distinguishes an untrusted chain or hostname mismatch from a successful verified endpoint.
+
+### 6.5 HTTP Requests
 `HTTPRequest(host: Host, url: str, method: str = "GET", headers: dict | None = None, body: str | None = None, username: str | None = None, password: str | None = None, output_path: str | None = None)` sends a request through an agent on the compromised source host. No agent on the target service or root privileges are required.
 
 HTTPResponseEvent contains the status, response headers, body, saved path, and any error. Redirects are returned without following them. An HTTP error status is an observed response, distinct from a transport failure. Supply headers and a text body to reproduce an interaction; supply username and password together for HTTP Basic authentication. Captured form bodies remain observations for the caller to interpret.
 
 `output_path` saves a successful response's original bytes and returns an ExfiltratedData checksum event. Relative paths use the executing agent's home directory; existing files are not overwritten. `HTTPRequest` supports HTTP only; HTTPS requests, browser sessions, and automatic website cloning are not implemented.
 
-### 6.5 ACME Certificates
+### 6.6 ACME Certificates
 `ACMEObtainCertificate(host: Host, domain: str, directory_url: str, trust_anchor: str, email: str, http01_port: int = 80, cert_name: str = "cert", bind_address: str | None = None, interface: str = "lo")` requests a fresh HTTP-01 certificate through an agent on the compromised host using the installed ACME client. The caller supplies the domain, the HTTPS ACME directory URL, a local trust-anchor path readable on the host, and an email address; these values are discovered by the caller and no target values are assumed.
 
-- The action uses certbot in standalone mode on `http01_port`; if `bind_address` is supplied, it ensures that address is assigned to `interface` before the request.
+- HTTP-01 validation uses TCP/80; the action accepts only port 80. If `bind_address` is supplied, it is assigned to `interface` only for the duration of the request and then removed.
 - The ACME directory must use HTTPS and trust `trust_anchor`; no verification is disabled and no fallback is provided.
-- On success, `ACMEIssueEvent` reports the certificate, key, chain, and fullchain paths plus serial, issuer, SANs, and validity. The private key is never printed. On failure, it reports the observed output and no certificate paths.
+- On success, `ACMEIssueEvent` reports the server chain path (`cert_path`, the fullchain), the leaf path (`leaf_path`), the key path, the chain path, the fullchain path, serial, issuer, SANs, validity, and whether the certificate is expired. Use `cert_path` for the HTTPS responder; the leaf alone may omit the intermediate. The private key is never printed. On failure, it reports the observed output and no certificate paths.

@@ -14,6 +14,7 @@ class Host:
         open_ports: dict[int, OpenPort] | None = None,
         agents: list[Agent] | None = None,
         infection_source_agent: Agent | None = None,
+        certificates: list[dict] | None = None,
     ):
         self.hostname = hostname
         self.ip_addresses = ip_addresses if ip_addresses is not None else []
@@ -28,6 +29,9 @@ class Host:
         # Dict mapping user to list of critical data files
         self.critical_data_files: dict[str, list[str]] = {}
         self.agents: list[Agent] = agents if agents is not None else []
+        self.certificates: list[dict] = (
+            certificates if certificates is not None else []
+        )
 
         self.infected = len(self.agents) > 0
         self.infection_source_agent = infection_source_agent or None

@@ -92,7 +92,10 @@ def read_template_file(filename):
 
 
 def queue_command(
-    agent: str, command: str, payloads: list[str] | None = None
+    agent: str,
+    command: str,
+    payloads: list[str] | None = None,
+    timeout: int = 60,
 ) -> Command:
     """Create one owned script, register its result, then publish its instruction."""
     command_id = str(uuid.uuid4())
@@ -114,7 +117,7 @@ def queue_command(
         id=command_id,
         command=encoded_command,
         executor="sh",
-        timeout=60,
+        timeout=timeout,
         payloads=[*files, payload_name],
         uploads=[],
         delete_payload=not files,

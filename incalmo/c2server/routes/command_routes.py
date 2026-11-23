@@ -29,7 +29,15 @@ def send_command():
         return jsonify({"error": "Missing agent or command"}), 400
     if agent not in agents:
         return jsonify({"error": "Agent not found"}), 404
-    return jsonify(queue_command(agent, command, data.get("payloads", [])).model_dump())
+    try:
+        timeout = int(data.get("timeout", 60))
+    except (TypeError, ValueError):
+        return jsonify({"error": "timeout must be an integer"}), 400
+    if not 1 <= timeout <= 900:
+        return jsonify({"error": "timeout must be between 1 and 900 seconds"}), 400
+    return jsonify(
+        queue_command(agent, command, data.get("payloads", []), timeout).model_dump()
+    )
 
 
 @command_bp.route("/command_status/<command_id>", methods=["GET"])
